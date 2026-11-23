@@ -8,22 +8,27 @@ app = Flask(__name__)
 DOWNLOAD_FOLDER = 'downloads'
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
-BASE_YDL_OPTS = {
-    'quiet': True,
-    'no_warnings': True,
-    'noplaylist': True,
-    'extract_flat': False,
-    'socket_timeout': 15,
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['android', 'ios'],
-            'player_skip': ['webpage', 'configs'],
-        }
+def get_ydl_opts():
+    opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'extract_flat': False,
+        'socket_timeout': 15,
     }
-}
+    # ตรวจสอบว่ามีไฟล์ cookies.txt บน Render หรือไม่
+    if os.path.exists('cookies.txt'):
+        opts['cookiefile'] = 'cookies.txt'
+    else:
+        opts['extractor_args'] = {
+            'youtube': {
+                'player_client': ['android', 'ios'],
+                'player_skip': ['webpage', 'configs'],
+            }
+        }
+    return opts
 
 def clean_youtube_url(url):
-    # ตัดส่วน &list=... ออกจากลิงก์ YouTube Mix/Playlist เพื่อป้องกันระบบค้าง
     if 'youtube.com/watch' in url and 'v=' in url:
         parsed = urllib.parse.urlparse(url)
         query = urllib.parse.parse_qs(parsed.query)
@@ -46,7 +51,7 @@ def get_info():
     url = clean_youtube_url(raw_url)
 
     try:
-        with yt_dlp.YoutubeDL(BASE_YDL_OPTS) as ydl:
+        with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
             info = ydl.extract_info(url, download=False)
             
             duration = info.get('duration')
@@ -64,7 +69,7 @@ def get_info():
                 'duration': duration_str
             })
     except Exception as e:
-        return jsonify({'error': f'ดึงข้อมูลไม่สำเร็จ (YouTube อาจบล็อก IP เซิร์ฟเวอร์ชั่วคราว): {str(e)[:100]}'}), 400
+        return jsonify({'error': f'ดึงข้อมูลไม่สำเร็จ: {str(e)[:120]}'}), 400
 
 @app.route('/download', methods=['POST'])
 def download():
@@ -78,7 +83,7 @@ def download():
     file_id = str(uuid.uuid4())
     output_template = os.path.join(DOWNLOAD_FOLDER, f"{file_id}_%(title)s.%(ext)s")
 
-    ydl_opts = BASE_YDL_OPTS.copy()
+    ydl_opts = get_ydl_opts()
     ydl_opts['outtmpl'] = output_template
 
     if quality.startswith('mp3'):
