@@ -14,11 +14,11 @@ opts = {
 'extract_flat': False,
 'socket_timeout': 15,
 }
-# ตรวจสอบว่ามีไฟล์ cookies.txt บน Render หรือไม่
+
 if os.path.exists('cookies.txt'):
 opts['cookiefile'] = 'cookies.txt'
 elif os.path.exists('/etc/secrets/cookies.txt'):
-# เผื่อกรณี Render เก็บ Secret File ไว้ในโฟลเดอร์ /etc/secrets/
+
 opts['cookiefile'] = '/etc/secrets/cookies.txt'
 else:
 opts['extractor_args'] = {
