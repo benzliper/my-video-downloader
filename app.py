@@ -1,5 +1,6 @@
 import os
 import uuid
+import urllib.parse
 from flask import Flask, render_template, request, send_file, after_this_request, jsonify
 import yt_dlp
 
@@ -7,18 +8,28 @@ app = Flask(__name__)
 DOWNLOAD_FOLDER = 'downloads'
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
-# ตั้งค่าพื้นฐานเพื่อเลี่ยงการบล็อกของ YouTube บน Cloud Server
 BASE_YDL_OPTS = {
     'quiet': True,
     'no_warnings': True,
     'noplaylist': True,
+    'extract_flat': False,
+    'socket_timeout': 15,
     'extractor_args': {
         'youtube': {
-            'player_client': ['android', 'ios', 'web'],
+            'player_client': ['android', 'ios'],
             'player_skip': ['webpage', 'configs'],
         }
     }
 }
+
+def clean_youtube_url(url):
+    # ตัดส่วน &list=... ออกจากลิงก์ YouTube Mix/Playlist เพื่อป้องกันระบบค้าง
+    if 'youtube.com/watch' in url and 'v=' in url:
+        parsed = urllib.parse.urlparse(url)
+        query = urllib.parse.parse_qs(parsed.query)
+        if 'v' in query:
+            return f"https://www.youtube.com/watch?v={query['v'][0]}"
+    return url
 
 @app.route('/')
 def index():
@@ -26,11 +37,13 @@ def index():
 
 @app.route('/info', methods=['POST'])
 def get_info():
-    data = request.get_json()
-    url = data.get('url', '').strip()
+    data = request.get_json(silent=True) or {}
+    raw_url = data.get('url', '').strip()
     
-    if not url:
+    if not raw_url:
         return jsonify({'error': 'กรุณาวางลิงก์วิดีโอก่อนครับ'}), 400
+
+    url = clean_youtube_url(raw_url)
 
     try:
         with yt_dlp.YoutubeDL(BASE_YDL_OPTS) as ydl:
@@ -51,16 +64,17 @@ def get_info():
                 'duration': duration_str
             })
     except Exception as e:
-        return jsonify({'error': f'ดึงข้อมูลไม่สำเร็จ: {str(e)}'}), 400
+        return jsonify({'error': f'ดึงข้อมูลไม่สำเร็จ (YouTube อาจบล็อก IP เซิร์ฟเวอร์ชั่วคราว): {str(e)[:100]}'}), 400
 
 @app.route('/download', methods=['POST'])
 def download():
-    url = request.form.get('url')
+    raw_url = request.form.get('url', '').strip()
     quality = request.form.get('quality', '1080')
     
-    if not url:
+    if not raw_url:
         return "กรุณาวางลิงก์วิดีโอก่อนครับ", 400
 
+    url = clean_youtube_url(raw_url)
     file_id = str(uuid.uuid4())
     output_template = os.path.join(DOWNLOAD_FOLDER, f"{file_id}_%(title)s.%(ext)s")
 
