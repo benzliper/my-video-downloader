@@ -7,6 +7,19 @@ app = Flask(__name__)
 DOWNLOAD_FOLDER = 'downloads'
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
+# ตั้งค่าพื้นฐานเพื่อเลี่ยงการบล็อกของ YouTube บน Cloud Server
+BASE_YDL_OPTS = {
+    'quiet': True,
+    'no_warnings': True,
+    'noplaylist': True,
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'ios', 'web'],
+            'player_skip': ['webpage', 'configs'],
+        }
+    }
+}
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -19,14 +32,8 @@ def get_info():
     if not url:
         return jsonify({'error': 'กรุณาวางลิงก์วิดีโอก่อนครับ'}), 400
 
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'noplaylist': True,
-    }
-
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(BASE_YDL_OPTS) as ydl:
             info = ydl.extract_info(url, download=False)
             
             duration = info.get('duration')
@@ -44,7 +51,7 @@ def get_info():
                 'duration': duration_str
             })
     except Exception as e:
-        return jsonify({'error': 'ไม่สามารถดึงข้อมูลจากลิงก์นี้ได้ โปรดตรวจสอบลิงก์อีกครั้ง'}), 400
+        return jsonify({'error': f'ดึงข้อมูลไม่สำเร็จ: {str(e)}'}), 400
 
 @app.route('/download', methods=['POST'])
 def download():
@@ -57,18 +64,17 @@ def download():
     file_id = str(uuid.uuid4())
     output_template = os.path.join(DOWNLOAD_FOLDER, f"{file_id}_%(title)s.%(ext)s")
 
+    ydl_opts = BASE_YDL_OPTS.copy()
+    ydl_opts['outtmpl'] = output_template
+
     if quality.startswith('mp3'):
         bitrate = quality.split('_')[1] if '_' in quality else '192'
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': output_template,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': bitrate,
-            }],
-            'noplaylist': True,
-        }
+        ydl_opts['format'] = 'bestaudio/best'
+        ydl_opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': bitrate,
+        }]
     else:
         if quality == '1080':
             format_str = 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
@@ -79,12 +85,8 @@ def download():
         else:
             format_str = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best'
 
-        ydl_opts = {
-            'format': format_str,
-            'outtmpl': output_template,
-            'merge_output_format': 'mp4',
-            'noplaylist': True,
-        }
+        ydl_opts['format'] = format_str
+        ydl_opts['merge_output_format'] = 'mp4'
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
