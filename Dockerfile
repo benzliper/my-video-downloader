@@ -1,12 +1,14 @@
 FROM python:3.11-slim
 
+COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
+
 RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 RUN chmod -R 777 /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && pip install --no-cache-dir --upgrade --pre "yt-dlp[default]"
 
 COPY . .
 
