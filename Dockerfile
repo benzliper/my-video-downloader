@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
 
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/* && deno --version
 
 WORKDIR /app
 RUN chmod -R 777 /app
