@@ -10,35 +10,73 @@ DOWNLOAD_FOLDER = 'downloads'
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
 
-def get_ydl_opts():
-    """สร้างชุดการตั้งค่าพื้นฐานสำหรับ yt-dlp โดยให้ใช้ค่าเริ่มต้นร่วมกับ Deno"""
+class YdlLogger:
+    """เก็บข้อความแจ้งเตือนและ Error จาก yt-dlp เพื่อใช้ตรวจสอบสาเหตุหากดาวน์โหลดไม่ผ่าน"""
+    def __init__(self):
+        self.warnings = []
+        self.errors = []
+
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        self.warnings.append(str(msg))
+
+    def error(self, msg):
+        self.errors.append(str(msg))
+
+
+def find_cookies_source():
+    """ค้นหาตำแหน่งไฟล์ cookies.txt ในเครื่องหรือใน Secret Files ของ Render"""
+    for path in ('cookies.txt', '/etc/secrets/cookies.txt'):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def get_ydl_opts(use_cookies=True, logger=None, player_clients=None):
+    """สร้างชุดการตั้งค่าพื้นฐานสำหรับ yt-dlp พร้อมเปิดใช้งาน Deno และ EJS"""
     opts = {
-        'quiet': True,
-        'no_warnings': True,
+        'quiet': logger is None,
+        'no_warnings': logger is None,
         'noplaylist': True,
         'extract_flat': False,
         'socket_timeout': 25,
         'nocheckcertificate': True,
-        'restrictfilenames': True,  # ป้องกัน Error จากชื่อคลิปที่มีอักขระพิเศษ
+        'restrictfilenames': True,
+        'remote_components': ['ejs:github'],
+        'js_runtimes': {'deno': {}},
     }
 
-    # คัดลอกไฟล์ cookies.txt ไปไว้ที่ /tmp เพื่อให้ yt-dlp ใช้งานได้โดยไม่ติดสิทธิ์ Read-only
-    temp_cookie = '/tmp/yt_cookies.txt'
-    try:
-        if os.path.exists('cookies.txt'):
-            shutil.copyfile('cookies.txt', temp_cookie)
-            opts['cookiefile'] = temp_cookie
-        elif os.path.exists('/etc/secrets/cookies.txt'):
-            shutil.copyfile('/etc/secrets/cookies.txt', temp_cookie)
-            opts['cookiefile'] = temp_cookie
-    except Exception as e:
-        print(f"Warning: Could not copy cookies file: {e}")
+    if logger is not None:
+        opts['logger'] = logger
+
+    if player_clients:
+        opts['extractor_args'] = {
+            'youtube': {
+                'player_client': player_clients,
+            }
+        }
+
+    if use_cookies:
+        cookie_src = find_cookies_source()
+        if cookie_src:
+            temp_cookie = '/tmp/yt_cookies.txt'
+            try:
+                shutil.copyfile(cookie_src, temp_cookie)
+                opts['cookiefile'] = temp_cookie
+            except Exception as e:
+                if logger:
+                    logger.warning(f"Copy cookies failed: {e}")
 
     return opts
 
 
 def clean_youtube_url(url):
-    """แปลงลิงก์ย่อ youtu.be และตัดพารามิเตอร์ Playlist/Mix ออกเพื่อป้องกันระบบค้าง"""
+    """แปลงลิงก์ย่อ youtu.be และตัดพารามิเตอร์ Playlist/Mix ออก"""
     parsed = urllib.parse.urlparse(url)
     if 'youtu.be' in parsed.netloc:
         video_id = parsed.path.lstrip('/')
@@ -52,7 +90,7 @@ def clean_youtube_url(url):
 
 
 def resolve_downloaded_filepath(ydl, info, is_mp3):
-    """ค้นหาพาธไฟล์สุดท้ายที่ดาวน์โหลดและแปลงไฟล์เสร็จสมบูรณ์แล้ว"""
+    """ค้นหาพาธไฟล์สุดท้ายที่ดาวน์โหลดและแปลงไฟล์เสร็จแล้ว"""
     requested = info.get('requested_downloads')
     if requested and isinstance(requested, list):
         filepath = requested[0].get('filepath')
@@ -80,7 +118,7 @@ def index():
 
 @app.route('/info', methods=['POST'])
 def get_info():
-    """ดึงข้อมูลพรีวิว (ปกคลิป ชื่อคลิป ช่อง และความยาว) โดยยังไม่ดาวน์โหลดไฟล์จริง"""
+    """ดึงข้อมูลพรีวิว (ปกคลิป ชื่อคลิป ช่อง และความยาว)"""
     data = request.get_json(silent=True) or {}
     raw_url = data.get('url', '').strip()
 
@@ -88,7 +126,7 @@ def get_info():
         return jsonify({'error': 'กรุณาวางลิงก์วิดีโอก่อนครับ'}), 400
 
     url = clean_youtube_url(raw_url)
-    opts = get_ydl_opts()
+    opts = get_ydl_opts(use_cookies=True)
     opts['skip_download'] = True
     opts['ignore_no_formats_error'] = True
 
@@ -116,7 +154,7 @@ def get_info():
 
 @app.route('/download', methods=['POST'])
 def download():
-    """ดาวน์โหลดและแปลงไฟล์เป็น MP4 หรือ MP3 พร้อมระบบสำรองรูปแบบไฟล์อัตโนมัติ"""
+    """ดาวน์โหลดและแปลงไฟล์ MP4/MP3 พร้อมลองสลับช่องทางอัตโนมัติหากติดข้อจำกัด"""
     raw_url = request.form.get('url', '').strip()
     quality = request.form.get('quality', '1080')
 
@@ -128,65 +166,90 @@ def download():
     output_template = os.path.join(DOWNLOAD_FOLDER, f"{file_id}_%(title)s.%(ext)s")
     is_mp3 = quality.startswith('mp3')
 
-    ydl_opts = get_ydl_opts()
-    ydl_opts['outtmpl'] = output_template
-
     if is_mp3:
-        bitrate = quality.split('_')[1] if '_' in quality else '192'
-        ydl_opts['format'] = 'bestaudio/best'
-        ydl_opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': bitrate,
-        }]
+        primary_format = 'bestaudio/best'
+    elif quality == '1080':
+        primary_format = 'bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b'
+    elif quality == '720':
+        primary_format = 'bv*[height<=720]+ba/b[height<=720]/bv*+ba/b'
+    elif quality == '480':
+        primary_format = 'bv*[height<=480]+ba/b[height<=480]/bv*+ba/b'
     else:
-        if quality == '1080':
-            format_str = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
-        elif quality == '720':
-            format_str = 'bestvideo[height<=720]+bestaudio/best[height<=720]/best'
-        elif quality == '480':
-            format_str = 'bestvideo[height<=480]+bestaudio/best[height<=480]/best'
-        else:
-            format_str = 'bestvideo+bestaudio/best'
+        primary_format = 'bv*+ba/b'
 
-        ydl_opts['format'] = format_str
-        ydl_opts['merge_output_format'] = 'mp4'
+    has_cookies = find_cookies_source() is not None
+
+    # รายการรูปแบบการลองดาวน์โหลดทีละขั้น (หลีกเลี่ยงการใช้ -f best อย่างเดียว)
+    attempts = [
+        (has_cookies, primary_format, None),
+        (has_cookies, 'bestaudio/best' if is_mp3 else None, ['default', 'mweb', 'web_safari']),
+    ]
+    if has_cookies:
+        # ลองใหม่แบบไม่ใช้ Cookies เผื่อ Cookies หมดอายุหรือบัญชีติด SABR
+        attempts.append((False, primary_format, None))
+        attempts.append((False, 'bestaudio/best' if is_mp3 else None, ['android', 'tv', 'web_safari']))
+    else:
+        attempts.append((False, 'bestaudio/best' if is_mp3 else None, ['android', 'tv']))
 
     filename = None
-    try:
+    last_error = ""
+    collected_warnings = []
+
+    for use_cookies, fmt, clients in attempts:
+        logger = YdlLogger()
+        ydl_opts = get_ydl_opts(use_cookies=use_cookies, logger=logger, player_clients=clients)
+        ydl_opts['outtmpl'] = output_template
+
+        if fmt:
+            ydl_opts['format'] = fmt
+
+        if is_mp3:
+            bitrate = quality.split('_')[1] if '_' in quality else '192'
+            ydl_opts['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': bitrate,
+            }]
+        else:
+            ydl_opts['merge_output_format'] = 'mp4'
+
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 filename = resolve_downloaded_filepath(ydl, info, is_mp3)
-        except yt_dlp.utils.DownloadError as dl_err:
-            # หากความละเอียดที่เลือกไม่มีในระบบ ให้ลองดาวน์โหลดใหม่ด้วยรูปแบบพื้นฐาน (best)
-            if 'Requested format is not available' in str(dl_err):
-                fallback_opts = ydl_opts.copy()
-                fallback_opts['format'] = 'bestaudio/best' if is_mp3 else 'best'
-                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    filename = resolve_downloaded_filepath(ydl, info, is_mp3)
-            else:
-                raise
-
-        if not filename or not os.path.exists(filename):
-            return "ไม่พบไฟล์ที่ดาวน์โหลดเสร็จสิ้น กรุณาลองใหม่อีกครั้ง", 500
-
-        @after_this_request
-        def remove_file(response):
-            try:
                 if filename and os.path.exists(filename):
-                    os.remove(filename)
-            except Exception as e:
-                print(f"Error removing file: {e}")
-            return response
+                    break
+        except Exception as e:
+            last_error = str(e)
+            for w in logger.warnings:
+                if w not in collected_warnings:
+                    collected_warnings.append(w)
 
-        basename = os.path.basename(filename)
-        clean_name = basename.split('_', 1)[1] if '_' in basename else basename
-        return send_file(filename, as_attachment=True, download_name=clean_name)
+    if not filename or not os.path.exists(filename):
+        deno_status = "พบ Deno" if shutil.which('deno') else "ไม่พบ Deno"
+        cookie_status = "พบ cookies.txt" if has_cookies else "ไม่มี cookies.txt"
+        warn_text = "\n".join(collected_warnings[:5]) if collected_warnings else "ไม่มีคำเตือนเพิ่มเติม"
+        return (
+            f"เกิดข้อผิดพลาดในการดาวน์โหลด: {last_error}\n\n"
+            f"--- ข้อมูลตรวจสอบระบบ ---\n"
+            f"สถานะระบบ: {deno_status} | {cookie_status}\n"
+            f"คำเตือนจาก yt-dlp:\n{warn_text}"
+        ), 500, {'Content-Type': 'text/plain; charset=utf-8'}
 
-    except Exception as e:
-        return f"เกิดข้อผิดพลาดในการดาวน์โหลด: {str(e)}", 500
+    file_to_remove = filename
+
+    @after_this_request
+    def remove_file(response):
+        try:
+            if file_to_remove and os.path.exists(file_to_remove):
+                os.remove(file_to_remove)
+        except Exception as e:
+            print(f"Error removing file: {e}")
+        return response
+
+    basename = os.path.basename(filename)
+    clean_name = basename.split('_', 1)[1] if '_' in basename else basename
+    return send_file(filename, as_attachment=True, download_name=clean_name)
 
 
 if __name__ == '__main__':
